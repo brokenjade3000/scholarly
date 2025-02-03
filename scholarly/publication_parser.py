@@ -312,7 +312,11 @@ class PublicationParser(object):
                                 'YYYY/M/DD',
                                 'YYYY/M/D',
                                 'YYYY/MM/D']
-                    publication['bib']['pub_year'] = arrow.get(val.text, patterns).year
+                    try:
+                        publication['bib']['pub_year'] = arrow.get(val.text, patterns).year
+                    except ValueError:
+                        # fallback to regex year extraction if arrow fails
+                         publication['bib']['pub_year'] = re.search(r'\d{4}', val.text).group()
                     publication['bib']['pub_date'] = val.text
                 elif key == 'description':
                     # try to find all the gsh_csp if they exist
