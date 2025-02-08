@@ -483,6 +483,10 @@ class ProxyGenerator(object):
                 # ScraperAPI requests to work.
                 # https://www.scraperapi.com/documentation/
                 init_kwargs["verify"] = False
+            if 'proxies' in init_kwargs:
+                proxy=init_kwargs['proxies']['https://']
+                del init_kwargs['proxies']
+                init_kwargs['proxy'] = proxy                       
         self._session = httpx.Client(**init_kwargs)
         self._webdriver = None
 
