@@ -9,3 +9,5 @@ python-dotenv
 requests[socks]
 selenium
 stem
+Pillow
+ipython
