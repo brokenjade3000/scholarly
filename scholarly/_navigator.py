@@ -17,6 +17,14 @@ from .publication_parser import _SearchScholarIterator
 from .author_parser import AuthorParser
 from .publication_parser import PublicationParser
 from .data_types import Author, PublicationSource, ProxyMode
+from PIL import Image
+import io
+import base64
+import sys
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+from pathlib import Path
 
 
 class Singleton(type):
@@ -196,6 +204,145 @@ class Navigator(object, metaclass=Singleton):
         self._max_retries = num_retries
 
 
+    def _show_captcha_image(self, element_or_src):
+        """Display captcha image to user and get their response.
+        
+        :param element_or_src: WebElement or image source URL
+        :returns: User's answer to the captcha
+        :rtype: str
+        """
+        # Get image data
+        if hasattr(element_or_src, 'screenshot_as_png'):
+            img_data = element_or_src.screenshot_as_png
+        else:
+            img_data = self._session1.get(element_or_src).content
+            
+        # Create PIL Image
+        img = Image.open(io.BytesIO(img_data))
+        
+        if 'ipykernel' in sys.modules:
+            # Jupyter notebook display
+            from IPython.display import display, HTML
+            bio = io.BytesIO()
+            img.save(bio, format='PNG')
+            img_str = base64.b64encode(bio.getvalue()).decode()
+            try:
+                from IPython.display import display, HTML, clear_output
+                display(HTML(f'<img src="data:image/png;base64,{img_str}"/>'))
+                # Get user input using IPython's input widget
+                from IPython.display import display
+                from ipywidgets import widgets
+                
+                text = widgets.Text(
+                    description='Captcha:',
+                    placeholder='Enter captcha text here'
+                )
+                submit = widgets.Button(description="Submit")
+                output = widgets.Output()
+                
+                display(text, submit, output)
+                
+                answer = []
+                def on_submit(b):
+                    with output:
+                        answer.append(text.value)
+                        clear_output()  # Clear the widgets after submission
+                    
+                submit.on_click(on_submit)
+                
+                # Wait for submission
+                while not answer:
+                    time.sleep(0.1)
+                    
+                return answer[0]
+            except ImportError:
+                self.logger.warning("IPython display failed, falling back to tkinter")
+                return self._show_tkinter_captcha(img)
+        else:
+            # Use tkinter for desktop display
+            return self._show_tkinter_captcha(img)
+
+    def _show_tkinter_captcha(self, img):
+        """Display captcha using tkinter window.
+        
+        :param img: PIL Image object
+        :returns: User's answer to the captcha
+        :rtype: str
+        """
+        answer = []
+        root = tk.Tk()
+        root.title("Captcha Entry")
+        
+        # Configure window
+        root.geometry("400x300")
+        root.resizable(False, False)
+        
+        # Prepare and display image
+        photo = ImageTk.PhotoImage(img)
+        label = ttk.Label(root, image=photo)
+        label.image = photo  # Keep a reference!
+        label.pack(pady=10)
+        
+        # Create input field
+        entry = ttk.Entry(root)
+        entry.pack(pady=10)
+        entry.focus()
+        
+        def submit():
+            answer.append(entry.get())
+            root.quit()
+            
+        # Create submit button
+        submit_btn = ttk.Button(root, text="Submit", command=submit)
+        submit_btn.pack(pady=10)
+        
+        # Handle enter key
+        root.bind('<Return>', lambda e: submit())
+        
+        # Center window on screen
+        root.eval('tk::PlaceWindow . center')
+        
+        # Start main loop
+        root.mainloop()
+        root.destroy()
+        
+        return answer[0] if answer else ""
+
+    def _handle_captcha(self, soup, premium=True):
+        """Handle captcha by showing it to user and getting their response.
+        
+        :param soup: BeautifulSoup object of the page
+        :param premium: Whether to use premium proxy
+        :returns: Updated session with solved captcha
+        """
+        pm = self.pm1 if premium else self.pm2
+        
+        if pm.proxy_mode == ProxyMode.SELENIUM:
+            # Handle Selenium case
+            driver = pm._get_webdriver()
+            captcha_img = driver.find_element(By.ID, "captcha")
+            answer = self._show_captcha_image(captcha_img)
+            
+            # Fill in captcha
+            input_field = driver.find_element(By.NAME, "captcha")
+            input_field.send_keys(answer)
+            submit_button = driver.find_element(By.NAME, "submit")
+            submit_button.click()
+            
+        else:
+            # Handle requests case
+            captcha_img = soup.find('img', id='captcha')
+            answer = self._show_captcha_image(captcha_img['src'])
+            
+            # Submit captcha answer
+            form_data = {
+                'captcha': answer,
+                # Add any other required form fields
+            }
+            session = pm.get_session()
+            session.post(soup.form['action'], data=form_data)
+            return session
+
     def _requests_has_captcha(self, text) -> bool:
         """Tests whether some html text contains a captcha.
 
@@ -204,10 +351,33 @@ class Navigator(object, metaclass=Singleton):
         :returns: whether or not the site contains a captcha
         :rtype: {bool}
         """
-        return self._has_captcha(
+        soup = BeautifulSoup(text, 'html.parser')
+        has_captcha = self._has_captcha(
             lambda i : f'id="{i}"' in text,
             lambda c : f'class="{c}"' in text,
         )
+        
+        if has_captcha:
+            try:
+                return self._handle_captcha(soup)
+            except Exception as e:
+                self.logger.error(f"Failed to handle captcha: {str(e)}")
+                return True
+                
+        return False
+    
+    # def _requests_has_captcha(self, text) -> bool:
+    #     """Tests whether some html text contains a captcha.
+
+    #     :param text: the webpage text
+    #     :type text: str
+    #     :returns: whether or not the site contains a captcha
+    #     :rtype: {bool}
+    #     """
+    #     return self._has_captcha(
+    #         lambda i : f'id="{i}"' in text,
+    #         lambda c : f'class="{c}"' in text,
+    #     )
 
     def _webdriver_has_captcha(self, premium=True) -> bool:
         """Tests whether the current webdriver page contains a captcha.
@@ -239,6 +409,7 @@ class Navigator(object, metaclass=Singleton):
         html = self._get_page('https://scholar.google.com{0}'.format(url))
         html = html.replace(u'\xa0', u' ')
         res = BeautifulSoup(html, 'html.parser')
+        Path('./test.html').write_text(html)
         try:
             self.publib = res.find('div', id='gs_res_glb').get('data-sva')
         except Exception:
